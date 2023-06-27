@@ -4,7 +4,6 @@ let
   microvmCommand = import ../pkgs/microvm-command.nix {
     inherit pkgs;
   };
-  user = "microvm";
   group = "kvm";
 in
 {
@@ -15,6 +14,15 @@ in
       description = ''
         Whether to enable the microvm.nix host module.
       '';
+    };
+
+    userConfig = {
+      user = mkOption {
+        type = types.str;
+        default = "microvm";
+      };
+
+      setupUser = mkEnableOption "setupUser";
     };
 
     vms = mkOption {
@@ -87,6 +95,11 @@ in
             default = true;
           };
 
+          environment = mkOption {
+            type = types.nullOr types.attrs;
+            default = null;
+          };
+
           restartIfChanged = mkOption {
             type = types.bool;
             default = config.config != null;
@@ -136,9 +149,9 @@ in
       }
     ]) (builtins.attrNames config.microvm.vms);
 
-    system.activationScripts.microvm-host = ''
+    system.activationScripts.microvm-host = lib.mkIf config.microvm.userConfig.setupUser ''
       mkdir -p ${stateDir}
-      chown ${user}:${group} ${stateDir}
+      chown ${config.microvm.userConfig.user}:${group} ${stateDir}
       chmod g+w ${stateDir}
     '';
 
@@ -146,7 +159,7 @@ in
       microvmCommand
     ];
 
-    users.users.${user} = {
+    users.users.${config.microvm.userConfig.user} = lib.mkIf config.microvm.userConfig.setupUser {
       isSystemUser = true;
       inherit group;
       # allow access to zvol
@@ -155,13 +168,13 @@ in
 
     security.pam.loginLimits = [
       {
-        domain = "${user}";
+        domain = "${config.microvm.userConfig.user}";
         item = "memlock";
         type = "hard";
         value = "infinity";
       }
       {
-        domain = "${user}";
+        domain = "${config.microvm.userConfig.user}";
         item = "memlock";
         type = "soft";
         value = "infinity";
@@ -198,7 +211,7 @@ in
             cd ${stateDir}/${name}
 
             ln -sTf ${runner} current
-            chown -h ${user}:${group} . current
+            chown -h ${config.microvm.userConfig.user}:${group} . current
           ''
           # Including the toplevel here is crucial to have the service definition
           # change when the host is rebuilt and the vm definition changed.
@@ -210,7 +223,7 @@ in
             echo '${if updateFlake != null
                     then updateFlake
                     else flake}' > flake
-            chown -h ${user}:${group} flake
+            chown -h ${config.microvm.userConfig.user}:${group} flake
           '';
         serviceConfig.SyslogIdentifier = "install-microvm-${name}";
       };
@@ -223,6 +236,8 @@ in
         # we also have to include a trigger here.
         restartTriggers = [guestConfig.system.build.toplevel];
         overrideStrategy = "asDropin";
+      } // lib.optionalAttrs (!isNull config.microvm.vms."${name}".environment) {
+        environment = config.microvm.vms."${name}".environment;
       };
     })) {
       "microvm-tap-interfaces@" = {
@@ -256,7 +271,7 @@ in
               ${pkgs.iproute2}/bin/ip tuntap del name $id mode tap
             fi
 
-            ${pkgs.iproute2}/bin/ip tuntap add name $id mode tap user ${user}
+            ${pkgs.iproute2}/bin/ip tuntap add name $id mode tap user ${config.microvm.userConfig.user}
             ${pkgs.iproute2}/bin/ip link set $id up
           done
         '';
@@ -303,7 +318,7 @@ in
             ${pkgs.iproute2}/bin/ip link set $id allmulticast on
             echo 1 > /proc/sys/net/ipv6/conf/$id/disable_ipv6
             ${pkgs.iproute2}/bin/ip link set $id up
-            ${pkgs.coreutils-full}/bin/chown ${user}:${group} /dev/tap$(< /sys/class/net/$id/ifindex)
+            ${pkgs.coreutils-full}/bin/chown ${config.microvm.userConfig.user}:${group} /dev/tap$(< /sys/class/net/$id/ifindex)
           done
         '';
       };
@@ -344,7 +359,7 @@ in
             [[ -e iommu_group ]] || exit 1
             VFIO_DEV=$(basename $(readlink iommu_group))
             echo "Making VFIO device $VFIO_DEV accessible for user"
-            chown ${user}:${group} /dev/vfio/$VFIO_DEV
+            chown ${config.microvm.userConfig.user}:${group} /dev/vfio/$VFIO_DEV
             popd
           done
         '';
@@ -375,7 +390,7 @@ in
 
             virtiofsd \
               --socket-path=$SOCKET \
-              --socket-group=${config.users.users.microvm.group} \
+              --socket-group=${config.users.users."${config.microvm.userConfig.user}".group} \
               --shared-dir $SOURCE \
               --rlimit-nofile ${toString serviceConfig.LimitNOFILE} \
               --thread-pool-size `nproc` \
@@ -402,6 +417,7 @@ in
           rm -f booted
           ln -s $(readlink current) booted
         '';
+
         postStop = ''
           rm booted
         '';
@@ -413,7 +429,7 @@ in
           TimeoutStopSec = 90;
           Restart = "always";
           RestartSec = "1s";
-          User = user;
+          User = config.microvm.userConfig.user;
           Group = group;
           SyslogIdentifier = "microvm@%i";
           LimitNOFILE = 1048576;
